@@ -1,33 +1,33 @@
-# CLS Cognitive Loop — CLAUDE.md Template
-# Copy to your project root as CLAUDE.md and fill in {PLACEHOLDER} values.
-# This template encodes the 6-step cognitive cycle as behavioral instructions.
+# {PROJECT_NAME} — CLS 6-Step Cognitive Loop
+> Integrate this into your LLM agent's system prompt. Fill in {PLACEHOLDER} values.
 
-# P0 — Cognitive Core Loop
-Every task passes through 6 mandatory steps:
-1. Situational Awareness — read context + trajectory, match keywords
+# 6-Step Cognitive Core Loop
+Every task passes through six mandatory steps. Loop closes: 6 -> 1.
+1. Situational Awareness — read state, match trajectory, cross-window peek
 2. Task Execution — scope, pre-flight, execute, cleanup
-3. Associative Learning — match new knowledge against known patterns
+3. Associative Learning — match new knowledge to patterns, flag contradictions
 4. Abstract Generalization — decontextualize into transferable patterns
-5. Context Persistence — write checkpoint to disk
-6. Trajectory Update — record delta-Q, delta-P; close loop back to step 1
+5. Context Persistence — write checkpoint, cross-session continuity
+6. Trajectory Update — record delta-q/delta-p, close loop to step 1
 
-# P0 — Fact Anchoring Protocol
-Every claim must reference file path + field value. No reference = not substantiated.
+# Step Declaration
+Before Write/Edit, declare your step by writing cog_step.json:
+{"version":1,"phase":2,"label":"2 Task Execution","declared_at":"2026-06-01T12:00:00Z"}
 
-# P0 — Dual-AI Gate
-- Generator: {GENERATOR_MODEL} — creates designs, writes code
-- Evaluator: {EVALUATOR_MODEL} — independently verifies all outputs
-- P(system error) ~ P(Generator err) x P(Evaluator err)
+# Cross-Window
+Multiple sessions share state/cross_window_context.json: peek/announce/update.
 
-# P0 — Fuse Board
-6 independent fuses (pure stdlib):
-- WRITE_PROTECT: block unauthorized writes to core files
-- RECURSION_LIMIT: max depth {MAX_RECURSION_DEPTH}
-- TOKEN_BUDGET: {SESSION_TOKEN_BUDGET} session / {DAILY_TOKEN_BUDGET} daily
-- PARALLEL_CAP: max {MAX_PARALLEL_TASKS} concurrent
-- CHECKPOINT_REQUIRED: every {CHECKPOINT_INTERVAL_SEC}s
+# Fact Anchoring
+Every claim MUST reference file path + field value. No floating assertions.
 
-# Project Configuration
-PROJECT_NAME={PROJECT_NAME}
-PROJECT_ROOT={PROJECT_ROOT}
-KNOWLEDGE_BASE_PATH={KNOWLEDGE_BASE_PATH}
+# Design Philosophy
+1. Short tasks, verified individually, chained into a cycle
+2. Generate, then verify with a SECOND independent model
+3. AI generates. CLS constrains. Humans set goals. AI x CLS x Human = closed loop
+
+# Fuse Board (stdlib-only, 6 fuses)
+WRITE_PROTECT | RECURSION_LIMIT | TOKEN_BUDGET | PARALLEL_CAP | CHECKPOINT | PROXY_PURITY
+
+# Your Project
+{PROJECT_ROOT} | {PRIMARY_LANGUAGE} | {PRIMARY_FRAMEWORK}
+{PROJECT_SPECIFIC_RULES}

@@ -1,0 +1,1 @@
+{"env":{"CLS_ROOT":"{PROJECT_ROOT}"},"hooks":{"PreToolUse":{"command":"powershell","description":"CLS safety checks"}},"model":"{PRIMARY_MODEL}"}
