@@ -202,3 +202,13 @@ This is not a replacement for semantic verification (that's the dual-AI gate's r
 | Forbidden words | `data/symbolic_dynamics/forbidden_words.json` |
 | Current verdict | `data/symbolic_dynamics/symbolic_verdict.json` |
 | Observation log | `data/symbolic_dynamics/observations/` |
+
+---
+
+## Positioning in the Academic Landscape
+
+For a detailed comparison with existing approaches (Semantic Entropy, LSD, Entropix, Klarity, etc.), see [SYMBOLIC_DYNAMICS_LANDSCAPE.md](SYMBOLIC_DYNAMICS_LANDSCAPE.md).
+
+Key differentiator: **CLS monitors agent behavior (tool-call sequences), not model output (text semantics).** Almost all existing work — from Farquhar et al. (Nature 2024) to Entropix (2025) to LSD (2025) — analyzes the *content* of what the model says. CLS analyzes the *pattern* of what the agent does. These are orthogonal signals: an agent can produce semantically perfect output while trapped in a behavioral loop. The symbolic dynamics pipeline catches the loop; semantic methods don't.
+
+The use of **subshift of finite type** to define a "legal behavior space" for LLM agents, and the combination of Shannon entropy + topological entropy + forbidden words as a real-time tri-metric stability score, appears to be unique in the open literature as of mid-2026.
