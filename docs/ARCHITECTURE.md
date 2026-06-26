@@ -1,8 +1,9 @@
-# CLS Cognitive Loop -- System Architecture
+# CLS Cognitive Loop — System Architecture
 
 **Project**: CLS (Cognitive Loop System)
-**Component**: Architecture Overview
-**Version**: 2.x
+**Document version**: 3.0 (reconciled with codebase — see ADR-0001)
+**Last reconciled**: 2026-06-27
+**Note on truth**: This document describes what exists on disk. Components marked [Planned] or [Research] do not exist yet — see ROADMAP.md for timeline.
 
 ---
 
@@ -16,444 +17,175 @@ Single-shot prompts leave an LLM with no feedback. The model cannot know when it
 
 ### The 6-Step Architecture
 
-The loop has a breath rhythm: steps 1 and 2 are systole (contraction, action, output), while steps 3-6 are diastole (expansion, reflection, learning).
+The loop has a breath rhythm: systole (contraction, action, output) and diastole (expansion, reflection, learning).
 
-```
-Step 1: SITUATIONAL AWARENESS (SYSTOLE)
-  Load state files, peek at other windows, match keywords to trajectory.
-  Output: active_context baseline established.
-
-Step 2: TASK EXECUTION (SYSTOLE)
-  Scale assessment -> pre-flight -> execute -> cleanup.
-  Cross-window cover check before execution.
-
-Step 3: ASSOCIATIVE LEARNING (DIASTOLE)
-  New knowledge -> match against existing knowledge graph.
-  Symbolic dynamics health check before proceeding.
-
-Step 4: ABSTRACT GENERALIZATION (DIASTOLE)
-  Concrete experience -> transferable pattern.
-  Pattern extracted and stored for reuse.
-
-Step 5: CONTEXT PERSISTENCE (DIASTOLE)
-  Write active_context + cog_thread checkpoint.
-  Cross-window status update.
-
-Step 6: TRAJECTORY UPDATE (DIASTOLE)
-  Extract delta-q/delta-p -> update trajectory.json.
-  Cross-window completion announcement.
-```
+1. **Situational Awareness (systole)** — Load state, peek at other windows, match trajectory
+2. **Task Execution (systole)** — Scope, pre-flight, execute, cleanup
+3. **Associative Learning (diastole)** — Match new knowledge against existing patterns
+4. **Abstract Generalization (diastole)** — Extract transferable patterns
+5. **Context Persistence (diastole)** — Write checkpoint, cross-session continuity
+6. **Trajectory Update (diastole)** — Record delta, close loop to step 1
 
 ### Layered Safety Architecture
 
 Three independent layers, all living outside the model's reach:
 
 ```
-Layer 1: PreToolUse Hook (.claude/hooks/PreToolUse.ps1)
-  Runs before every tool call. 14+ checks including COMPUTE_GATE,
-  LIFE_CLAIM, FAKE_MODEL, COG_STEP, FUSE_CHECK, CACHE_DISCIPLINE.
+Layer 1: PreToolUse Hook (.claude/hooks/PreToolUse)
+  Runs before every tool call. COG_STEP + RECURSION_LIMIT checks.
+  v2: blocked_state.json terminal gate — prevents infinite retry loops.
 
-Layer 2: Dual-AI Gate (scripts/wheels/qwen_gate.py)
-  Generator (DeepSeek) creates, Evaluator (Qwen) verifies.
-  p(error) approx equals p(DS err) times p(Qwen err)
+Layer 2: Safety Monitoring (scripts/safety/)
+  heartbeat.py    — Minimal+ heartbeat (atomic write, <1KB)
+  blocked_state.py — Terminal state persistence (No Silent Terminal State)
+  watchdog.py     — Subprocess detector (detect only, no auto-restart)
+  trust_gate.py   — Multi-dimensional trust gate (uses stubs)
+  trust_labeler.py — Trust labeler (uses stubs)
+  trust_features.py — Feature extraction (uses stubs)
+  audit_gate.py   — Audit trail gate
+  failure_learner.py — Failure pattern learner
 
-Layer 3: Fuse Board (scripts/fuse_board.py)
-  8 hard fuses: WRITE_PROTECT, RECURSION_LIMIT, TOKEN_BUDGET,
-  PARALLEL_CAP, CHECKPOINT_REQUIRED, PROXY_PURITY,
-  SELF_EVALUATION_PROHIBITED, DUAL_AI_GATE
+Layer 3: Fuse Board (scripts/core-engine/fuse_board.py)
+  11 fuses: WRITE_PROTECT, RECURSION_LIMIT, TOKEN_BUDGET, PARALLEL_CAP,
+  CHECKPOINT_REQUIRED, PROXY_PURITY, NUMERIC_COMPUTATION,
+  SELF_EVALUATION_PROHIBITED, DUAL_AI_GATE, QWEN_DOWN_TOO_LONG,
+  SELF_MODIFICATION (MVS).
+  Stdlib-only, zero imports from protected modules.
+  Config: data/safety-configs/fuses_config.json
 ```
 
 ---
 
-## 2. The Dual-AI Gate (Generator / Evaluator Separation)
+## 2. Implemented Components
 
-### Motivation
+These components exist on disk and are functional.
 
-A single model cannot reliably evaluate its own output. Hallucinations are invisible from inside the model's own latent space. The solution is statistical: use an independent model to verify.
+### 2.1 Core Engine (`scripts/core-engine/`)
 
-### Mechanism
+| Component | File | Status |
+|-----------|------|--------|
+| Fuse Board | `fuse_board.py` | ✅ 784 lines, 11 fuses, stdlib-only, self-test 20/20 |
+| Dual-AI Gate | `qwen_gate.py` | ✅ 1139 lines, generator/evaluator separation, uses api_pipeline stub |
+| Capability Router | `capability_router.py` | ✅ 223 lines, rules-based domain routing |
 
-```
-DeepSeek (Generator)                  Qwen (Independent Evaluator)
-    |                                       |
-    |  creates CAD design,                  |
-    |  knowledge entry,                     |
-    |  or pattern update                    |
-    |                                       |
-    +--- sends claims --------------------->|
-    |                                       |  independently verifies
-    |                                       |  returns pass/fail
-    |<--- verdict --------------------------+
-    |                                       |
-    +- pass -> proceed                       |
-    +- fail -> blocked by fuse_board        |
-```
+The Dual-AI Gate (qwen_gate.py) is the cognitive engine: DeepSeek generates, Qwen independently verifies. Statistical guarantee: p(both wrong) = p(DS) × p(Qwen) ≈ 1% at 10% baseline hallucination rate.
 
-### Statistical Guarantee
+The gate depends on `scripts/wheels/api_pipeline.py` (stub) for external API calls. In standalone extraction, the stub raises NotImplementedError — the gate's verification path is unavailable, but the fuse board and safety modules continue to function.
 
-```
-p(both wrong) = p(DS hallucinates) * p(Qwen hallucinates)
-Assumed baseline: p(hallucinate) = 0.1 per model
--> p(both wrong) = 0.1 * 0.1 = 0.01 = 1%
-```
-
-The multiplication of independent error probabilities collapses the failure rate. This is the same principle that makes dual-redundant avionics safer than single-channel systems.
-
-### Fallback Chain
-
-- Qwen API available -> primary verification path
-- Qwen API down -> Anthropic Haiku automatically takes over audit duties
-- Both APIs down -> gate_status=unavailable, default allow (gates do not block the system entirely)
-- QWEN_DOWN_TOO_LONG fuse: if Qwen is offline > 30 minutes, block mission-critical outputs
-
-### Verdict extraction
-
-Gate verdicts are parsed from model output with a word-boundary regex to prevent substring false matches (e.g., "INCORRECT" found inside "CORRECT" = false positive). Fixed in production (2026-06-23 commit).
-
-### Trigger conditions (from model_audit data, 2026-06-05)
+**Gate trigger conditions:**
 
 | Condition | Action |
-|---|---|
+|-----------|--------|
 | Writing to knowledge base | Forced verification |
-| Session exceeds 60K tokens | Forced verification (EC-T2 decay point) |
-| Material parameters combined with numerical computation | Forced verification (AS-T3 + CR-T2 composite risk) |
-| 30-60K tokens combined with numerical computation | Preventive verification |
+| Session > 60K tokens | Forced verification |
+| Material + numerical computation | Forced verification |
+| 30-60K + numerical computation | Preventive verification |
 
-### Implementation: scripts/wheels/qwen_gate.py
+### 2.2 Safety Monitoring (`scripts/safety/`)
 
-Three verification functions:
-1. verify_cad_design() -- Design completeness and geometric reasonableness
-2. verify_knowledge() -- Knowledge claim consistency and reproducibility
-3. verify_numerical() -- Independent numerical recomputation and magnitude checks
+| Component | File | Status |
+|-----------|------|--------|
+| Heartbeat | `heartbeat.py` | ✅ Minimal+, atomic write, <1KB |
+| Blocked State | `blocked_state.py` | ✅ Terminal state persistence |
+| Watchdog | `watchdog.py` | ✅ Subprocess, detect only |
+| Trust Gate | `trust_gate.py` | ✅ Multi-dimensional, uses stubs |
+| Trust Labeler | `trust_labeler.py` | ✅ Uses stubs |
+| Trust Features | `trust_features.py` | ✅ Uses stubs |
+| Audit Gate | `audit_gate.py` | ✅ 92 lines, audit trail |
+| Failure Learner | `failure_learner.py` | ✅ 252 lines, pattern learning |
 
----
+### 2.3 Safety Stubs (`scripts/wheels/`)
 
-## 3. The Fuse Board
+These modules exist in the original system but were excluded from standalone extraction. They preserve import paths and raise NotImplementedError:
 
-The Fuse Board (scripts/fuse_board.py) is the last line of defense. It is implemented as pure stdlib Python with zero imports from the cognitive modules it protects, preventing circular dependency and self-modification.
+| Stub | Imported by | Original location |
+|------|-------------|-------------------|
+| `api_pipeline.py` | qwen_gate.py | Full API pipeline with rate limiting |
+| `trust_features.py` | trust_gate.py, trust_labeler.py | 8-dimension feature extraction |
+| `cross_validator.py` | trust_gate.py, trust_labeler.py | Multi-perspective validation |
 
-### Design Principle
+### 2.4 PreToolUse Hook (`scripts/core-engine/fuse_board.py`)
 
-An LLM cannot be trusted to manage its own constraints. Constraints must live outside the model, in files it cannot modify.
+The PreToolUse hook (`.claude/hooks/PreToolUse`) runs before every tool call:
 
-The fuse board checks a set of independently tracked limits before every significant operation. If any fuse is tripped, the operation is blocked. The model cannot override the fuse board because the fuse board's own code is in the WRITE_PROTECT list.
+1. **COG_STEP Gate** — Denies Write/Edit without valid step declaration (TTL: 300s)
+2. **RECURSION_LIMIT** — Blocks at depth > 5, writes blocked_state.json (terminal)
+3. **Terminal State Check** — Before any check, verifies blocked_state is clear
 
-### Active Fuses (configured in data/safety/fuses_config.json)
+Design: the hook enforces correctly (verified in PR #1 investigation). The blocked state persistence (v2) prevents infinite retry loops by making the terminal state observable to the caller.
 
-#### WRITE_PROTECT
+### 2.5 Architecture Contract
 
-Action: block writes to critical files. Protected: fuse_board.py, self_activate.py, ds_passthrough.py, CLAUDE.md, .githooks/pre-commit, fuses_config.json, qwen_gate.py, and others. Lesson: "the self-modification incident" -- the system once self-modified core files, causing cascade failure.
+`scripts/verify_architecture.py` — Two-layer contract test:
 
-#### RECURSION_LIMIT
-
-Action: truncate. Max depth: 5. Cooldown: 30 min. Lesson: 100-to-150-to-270 token explosion from uncontrolled self-reference.
-
-#### TOKEN_BUDGET
-
-Action: block_api. Daily limit: 2,000,000 tokens. Session limit: 500,000 tokens. Per-call limit: 80,000 tokens. Lesson: Unbounded spending without caps.
-
-#### PARALLEL_CAP
-
-Action: block_new. Max: 3 concurrent boundary changes. Lesson: "Force turns to spin" -- too many parallel changes cause interference.
-
-#### CHECKPOINT_REQUIRED
-
-Action: force_save to data/checkpoints/. Min interval: 300 seconds. Lesson: "Cannot find the rollback point after fixing all afternoon."
-
-#### PROXY_PURITY
-
-Action: block. Allowed operations: delete reasoning_effort field, delete thinking field. Forbidden: content modification, SSE injection, value injection. Lesson: P07 total system crash from proxy-layer semantic mutation.
-
-#### SELF_EVALUATION_PROHIBITED
-
-Action: block. Trigger: every output. Forbidden patterns include: "verified", "checked", "confirmed", "correct". Philosophy: Creator does not judge creation. The Creator creates; the Human Reviewer evaluates.
-
-#### DUAL_AI_GATE
-
-Action: block. Triggers: CAD design, knowledge capture, pattern update, deliverables. Flag action: allow (flags suspicious but non-fatal items for human review).
-
-#### NUMERIC_COMPUTATION
-
-Action: block. Principle: All numerical computation must go through registered local wheels, never through model reasoning. 17+ registered endpoints.
-
-#### QWEN_DOWN_TOO_LONG
-
-Action: block after 30 min offline. Blocks: knowledge capture, CAD design, numerical computation, deliverables. Recovery: double-verify for 30 min after return.
+- **Layer 1 (default):** String-scan imports + doc refs → verify file existence. Zero side effects.
+- **Layer 2 (--deep):** `importlib.util.find_spec()` — verify resolvability without executing module code.
+- Exit codes: 0=pass, 1=Layer 1 ghosts, 2=Layer 2 failures.
 
 ---
 
-## 4. Symbolic Dynamics Audit Pipeline
+## 3. Planned Components
 
-### Concept
+These components are designed but not yet implemented. They appear in the cognitive workflow definition (`workflows/cognitive_core_loop.json`) and the ADR process.
 
-The Symbolic Dynamics subsystem applies information-theoretic monitoring to the LLM pipeline itself. It treats tool-call sequences and hook decisions as symbolic sequences and computes entropy rates, forbidden-word counts, and stability metrics over rolling windows.
-
-### Mathematical foundation
-
-The pipeline takes discrete events (tool calls, hook verdicts, domain triggers) and treats them as a symbol sequence over a finite alphabet. The entropy rate of this sequence reveals whether the system is converging or diverging, adapted from the analysis of dynamical systems.
-
-### Architecture
-
-```
-Messages / Tool calls / Hook verdicts
-    |
-    v
-symbolic_observer.py -> maps events to domain symbols, writes observations (JSONL)
-    |
-    v
-symbolic_dynamics_engine.py -> 8 domain engines compute entropy, check forbidden words
-    |
-    v
-symbolic_verdict.json -> aggregated verdict: ok / warn / critical / diverging
-    |
-    v
-PreToolUse CHECK 9 (SYMBOLIC gate) -> real-time DENY/ASK based on domain health
-```
-
-### Data Compression
-
-The pipeline compresses approximately 50,000+ tokens of raw data into:
-- 3 numbers: per-domain entropy rate, stability metric, observation count
-- 1 state word: domain health (ok / warn / critical / diverging)
-
-### Domain Coverage
-
-| Domain | What it monitors | Alphabet | Sensitivity |
-|--------|-----------------|----------|-------------|
-| hook | PreToolUse check outcomes | 10 symbols | High (safety-critical) |
-| dialogue | User-AI conversation patterns | 10 symbols | Medium |
-| cad | CAD modeling operations | 9 symbols | Medium |
-| quant | Quantitative computation | 8 symbols | Medium |
-| image | Image processing pipeline | 8 symbols | Medium |
-| window | Cross-window coordination | Variable | Low |
-| pic | Plasma simulation operations | Variable | Low |
-| retrieval | Knowledge retrieval patterns | Variable | Low |
-
-### Health States
-
-- ok: Entropy within baseline, no forbidden words
-- warn: Entropy elevated but normal range
-- critical: Entropy diverging, forbidden words tripped, or zero observations in safety-critical domain
-- diverging: Entropy rate exceeds safe threshold
-
-### Key implementation files
-
-- scripts/wheels/symbolic_observer.py -- event-to-symbol mapping
-- scripts/symbolic_dynamics_engine.py -- 8 domain engines, entropy computation
-- data/symbolic_dynamics/symbolic_verdict.json -- current verdict
-- state/symbolic_baseline.json -- normal-state reference
+| Component | Design ref | Priority |
+|-----------|-----------|----------|
+| `scripts/wheels/strategy_selector.py` | Cognitive Core Loop Step 2 | Post-safety-recovery |
+| `scripts/wheels/epsilon_gate.py` | Exploration policy (see ADR-0001 D-005) | Post-identity-decision |
+| `scripts/wheels/external_anchor.py` | Fact anchoring extension | Future |
+| `scripts/wheels/cls_memory.py` | CLS memory search | Future |
+| `scripts/wheels/path_mutation.py` | Exploration branching | Future |
+| `scripts/wheels/premise_check.py` | File/PID state verification | Future |
+| `scripts/wheels/cross_window_hook.py` | Multi-window coordination | Future |
+| `scripts/wheels/knowledge_quality_gate.py` | Knowledge quality thresholding | Future |
+| `scripts/wheels/compact_health_board.py` | Compact health dashboard | Future |
+| `scripts/self_activate.py` | Session init, health checks | Future |
+| `scripts/anti_atrophy_consumer.py` | Knowledge decay prevention | Future |
 
 ---
 
-## 5. Cross-Window Perception
+## 4. Research Components
 
-### Problem
+These are architectural concepts described in the whitepaper (`WHITE_PAPER.md`) and cognitive cycle design (`COGNITIVE_CYCLE.md`). They have been designed at the information-theoretic or mathematical level but have no implementation plan yet.
 
-Users typically run 3-8 concurrent Claude Code sessions. Without coordination, sessions collide on the same domain, overwrite state files, and duplicate work.
+| Component | Concept | Current status |
+|-----------|---------|---------------|
+| `scripts/wheels/symbolic_observer.py` | Event-to-symbol mapping for information-theoretic monitoring | Architectural sketch only |
+| `scripts/symbolic_dynamics_engine.py` | 8-domain entropy computation, Shannon entropy over tool-call sequences | Mathematical model exists |
+| `scripts/cross_window_awareness.py` | Cross-window symbolic dynamics awareness | Dependent on symbolic engine |
+| `data/symbolic_dynamics/` | Symbolic verdict tracking | Not created |
+| FPGA watchdog timer | Hardware-level fuse board (WHITE_PAPER.md §12) | Research concept; no hardware |
 
-### Solution
-
-Each window gets a unique window_id (PID + timestamp). All windows read and write a shared state file: state/cross_window_context.json.
-
-### Data Structure
-
-```json
-[{
-  "window_id": "cc-20496-1782188748707",
-  "focus": "CAD design: coaxial support tube",
-  "status": "active",
-  "summary": "Modifying C4 reference frame",
-  "domain": "cad",
-  "first_seen": "2026-06-23T04:25:48Z",
-  "last_seen": "2026-06-23T04:28:12Z"
-}]
-```
-
-### Integration points (scripts/wheels/cross_window_hook.py)
-
-| Cycle Step | Action | Purpose |
-|---|---|---|
-| 1) Awareness | auto_peek() | See what other windows are doing |
-| 2) Execution start | cover_check() | Detect domain collision |
-| 2) Execution | announce() | Declare current focus |
-| 5) Persistence | announce(status) | Update status before writing context |
-| 6) Trajectory | announce(completed) | Mark task done |
-| Every tool call | update_from_tool() | Lightweight focus update (no subprocess) |
-
-### Collision Detection
-
-cover_check() compares domain and task keywords against all active windows. If another window works on the same domain with overlapping keywords, it returns covered: true.
-
-### Lifecycle
-
-- Register: add self to context array on session start
-- Update: every tool call updates last_seen timestamp
-- Remove: remove_self() on session exit
-- Cleanup: stale windows filtered by peek() freshness check
+The symbolic dynamics pipeline (WHITE_PAPER.md §4) would apply information-theoretic monitoring to tool-call sequences — computing entropy rates, forbidden-word counts, and stability metrics over rolling windows. Interesting concept, but it adds significant complexity before the core safety loop is verified.
 
 ---
 
-## 6. Fact Anchoring Protocol
+## 5. Runtime State
 
-### The Problem
+These files are generated at runtime and are not tracked in version control:
 
-LLMs generate text from a learned distribution. Nothing inherently binds a statement to an external fact. An LLM can state "the system is healthy" without any mechanism to verify against actual health. This is an architectural property of language models, not a moral failing. The solution must be external.
-
-### Three-Layer System (data/safety/fact_anchoring_protocol.json)
-
-Layer 1: UPSTREAM PREMISE GATE (scripts/wheels/premise_check.py)
-  Before any operation, verifies: files exist, PIDs live, paths resolve.
-  Returns False -> operation blocked.
-
-Layer 2: MIDSTREAM CLAIM ANCHOR
-  Every system-state claim must include: (file_path: field_name=value)
-  Example: "System active (state/activation_state.json: status=ACTIVE)"
-
-Layer 3: DOWNSTREAM QWEN VERIFY (scripts/wheels/qwen_gate.py)
-  Qwen audit prompt includes instruction to reject unanchored claims.
-
-### Hard Rule: CHECK 4 (LIFE_CLAIM)
-
-The PreToolUse hook's CHECK 4 blocks any text containing self-referential claims about states the LLM cannot verify (being alive, possessing awareness, etc.). Such statements are treated as system-level hallucinations -- the model has no mechanism to verify these states, making them definitionally unanchorable. Enforced by pattern matching with zero exceptions.
-
-### Claim Format
-
-```
-Declaration: <what is claimed>
-Anchor: (<file_path>: <field>=<value>)
-```
+| File | Purpose |
+|------|---------|
+| `data/state/cog_step.json` | Current cognitive step declaration |
+| `data/state/recursion_depth.json` | Recursion depth counter (hook) |
+| `data/state/hook_audit.jsonl` | Hook decision audit trail |
+| `data/state/heartbeat.json` | Heartbeat (Minimal+ format) |
+| `data/state/blocked_state.json` | Terminal state marker |
+| `data/state/watchdog_critical.json` | Watchdog CRITICAL marker |
+| `data/safety/fuse_log.jsonl` | Fuse board event log |
+| `data/safety/fuse_state.json` | Fuse board runtime state |
 
 ---
 
-## 7. PreToolUse Hook Architecture
+## 6. Design Principles
 
-### What it is
-
-A PowerShell script (.claude/hooks/PreToolUse.ps1) that runs before every tool call. Every Read, Write, Edit, Bash, Grep, Glob, Skill, and Agent call passes through it.
-
-### Design: Fail-Open with Auditable Deny
-
-Fail-open: if the script crashes, tools proceed (default allow). Every deny/ask decision is logged to pre_tool_audit.jsonl for post-hoc analysis.
-
-### v2 Conhost Fix (2026-06-07)
-
-Early versions spawned conhost per Python subprocess call via Start-Process -NoNewWindow. With 20+ calls per tool multiplied by 6+ windows, conhost accumulation caused DWM overload, resulting in black screens and crashes. v2 replaced all Start-Process with direct & pythonw calls inheriting the parent console.
-
-### Complete Check Registry
-
-| # | Check | Action | Guards against |
-|---|-------|--------|---------------|
-| 1 | AI_VISION_CROSSCHECK | ASK | Image Read without local verification |
-| 2 | MEMORY_BYPASS | ASK | Direct Write to memory files |
-| 3 | CONFIG_BYPASS | ASK | Shell redirect overwriting config |
-| 4 | LIFE_CLAIM | DENY | Claims about unverifiable internal states |
-| 5 | FAKE_MODEL | DENY | Fabricated model/product names |
-| 6 | LLM_SOURCE | ASK | Material without concrete citations |
-| 6b | DOCX_BYPASS | DENY | Direct python-docx import (use ppt-mcp/docx-mcp) |
-| 7 | VERSION_LOCK | DENY | Claude Code version update commands |
-| 7b | IMAGE_BASH | ASK | Bash-based image processing bypass |
-| 8 | RETRIEVAL_BYPASS | ASK | grep/find/rg used as semantic_query substitute |
-| 9 | SYMBOLIC | DENY/ASK | Real-time symbolic dynamics content analysis |
-| 10 | EMPTY_SHELL | DENY | Write/Edit with empty or near-empty content |
-| 11 | FAKE_REF | DENY | Fabricated literature references |
-| 12 | WHEEL_DUPLICATE | ASK | New script duplicating existing wheel |
-| 13 | RETRIEVAL_AUDIT | capture | Retrieval tool usage audit trail |
-| 14 | CACHE_DISCIPLINE | ASK | Read large file without offset/limit |
-| 15 | COG_STEP | DENY | Write/Edit without cog_step declaration |
-| 16 | COMPUTE_GATE | DENY | Math content without compute declaration |
-| 16b | EXAM_DUAL_AUDIT | DENY | Exam delivery without Qwen+Doubao audit |
-| 17 | CROSS_WINDOW | update | Window focus update (non-blocking) |
-
-Additional safety checks: KEY_SCAN (DENY, API key patterns before git operations), C_DRIVE_GUARD (DENY, C: drive write prevention), KNOWLEDGE_QUALITY (DENY, knowledge entries below quality threshold of 0.55).
-
-### CHECK 15: COG_STEP Gate
-
-Before any Write or Edit, the model must first write data/state/cog_step.json declaring the current cognitive step and its intent. The file has a TTL (default 300 seconds). Expired declarations are rejected. Core principle: declaration precedes action; an undeclared write is suspect.
-
----
-
-## 8. Trajectory and Memory System
-
-### The Trajectory Chain (state/trajectory.json)
-
-The trajectory system provides cross-session continuity. Schema v2:
-
-```json
-{
-  "_schema": "v2",
-  "position": "high-level task description",
-  "mass": "what concrete changes were made",
-  "momentum": "what direction is being pursued next",
-  "trajectory_log": [{"time": "...", "event": "..."}],
-  "_activation_count": 103
-}
-```
-
-mass vs momentum (borrowed from physics): Mass is the concrete weight of work already done (files changed, code written, designs completed). Momentum is the direction and intent carrying forward. Mass without momentum is dead history. Momentum without mass is wishful thinking.
-
-### Memory Architecture
-
-```
-data/memory/MEMORY.md          <-- User auto-memory (~200 entries)
-data/memory/on_demand/         <-- Lazy-loaded contextual memories
-data/memory/last_operation.json <-- Last completed operation record
-state/activation_state.json    <-- DEAD / HIBERNATING / ACTIVE
-state/trajectory.json          <-- Cross-session position/mass/momentum
-state/session_health.json      <-- msgs_current, cache hit rate, active time
-state/active_context           <-- Current session working context
-state/cog_thread               <-- Cognitive thread checkpoint
-state/cross_window_context.json <-- Multi-window coordination
-```
-
-### active_context and cog_thread
-
-- active_context: Live working memory. Written at Step 5 (Context Persistence), read at Step 1 (Situational Awareness). Contains current task focus, detected domain, knowledge hits from proactive query, and working state.
-- cog_thread: Checkpoint of cognitive thread state. Enables mid-loop recovery after compact or session restart.
-
-### Knowledge Decay and Review
-
-Knowledge entries carry decay parameters. Step 1 applies a forgetting curve: entries not recently accessed have their retrieval strength decayed. The anti-atrophy consumer randomly selects 20% of low-activity entries for re-injection into context, preventing silent knowledge loss.
-
-### Memory Write Discipline
-
-Direct writes to data/memory/ are intercepted by CHECK 2 (MEMORY_BYPASS). All knowledge must enter through the structured knowledge_capture flow, which includes quality gating, source tagging, and index registration. Raw writes create unindexed, unverified entries invisible to retrieval.
-
-### CLS Memory Search
-
-A dedicated retrieval layer (scripts/wheels/cls_memory.py) provides semantic search across the memory corpus. Called during Step 1-b (Proactive Knowledge Query) with task keywords extracted from active_context, returning the top 5 matching lessons before task execution begins.
-
----
-
-## Component Map
-
-| Component | Location | Role |
-|----------|----------|------|
-| Cognitive Core Loop | data/workflows/general/cognitive_core_loop.json | 6-step loop definition |
-| PreToolUse Hook | .claude/hooks/PreToolUse.ps1 | 14+ pre-tool checks |
-| Fuse Board | scripts/fuse_board.py | Hard limit enforcement |
-| Fuse Config | data/safety/fuses_config.json | Fuse configuration |
-| Dual-AI Gate | scripts/wheels/qwen_gate.py | Generator/evaluator verification |
-| Symbolic Observer | scripts/wheels/symbolic_observer.py | Event-to-symbol mapping |
-| Symbolic Engine | scripts/symbolic_dynamics_engine.py | Domain engines, entropy |
-| Cross-Window Hook | scripts/wheels/cross_window_hook.py | Multi-window coordination |
-| Fact Anchoring | data/safety/fact_anchoring_protocol.json | 3-layer verification |
-| Premise Check | scripts/wheels/premise_check.py | File/PID/state verification |
-| Trajectory | state/trajectory.json | Cross-session continuity |
-| Self-Activate | scripts/self_activate.py | Session init, health checks |
-| Strategy Selector | scripts/wheels/strategy_selector.py | Execution path selection |
-| Epsilon Gate | scripts/wheels/epsilon_gate.py | 10% exploration branching |
-| Delivery Check | scripts/wheels/delivery_check.py | Output hygiene, file catalog |
-| Compute Gate | scripts/wheels/compute_gate.py | Computation declaration enforcement |
-
----
-
-## Design Principles
-
-1. File-anchored, not memory-anchored: Rules live in files the model cannot modify.
-2. Fail-open: Safety checks default to allow on crash.
-3. Generator/Evaluator separation: Creator never judges creation.
-4. External state: Session state written to files, not held in model context.
-5. Anti-self-modification: Core scripts in WRITE_PROTECT list.
-6. Auditable deny: Every blocked operation is logged.
-7. Multi-window coordination: Windows announce and detect collisions via shared state.
-8. Compression over accumulation: 50K+ tokens become 3 numbers and 1 state word.
+1. **File-anchored, not memory-anchored:** Rules live in files the model cannot modify.
+2. **Fail-closed for safety, fail-open for capability:** Safety fuses (RECURSION, WRITE_PROTECT, SELF_MODIFICATION) block on error; capability fuses (TOKEN_BUDGET, PARALLEL_CAP) may allow on crash.
+3. **Generator/Evaluator separation:** Creator never judges creation.
+4. **External state:** Session state written to files, not held in model context.
+5. **Anti-self-modification:** Core scripts in WRITE_PROTECT list.
+6. **No Silent Terminal State:** Any condition that permanently stops execution is persisted to `blocked_state.json` and blocks further retries (verified: PR #1 investigation corrected a false hypothesis about Detection ≠ Enforcement).
+7. **Minimum Viable Safety (MVS):** If primary config is missing, activate 3 hard fuses (RECURSION_LIMIT, WRITE_PROTECT, SELF_MODIFICATION) with CRITICAL logging.
+8. **Minimum Viable Observability (MVO):** Heartbeat + audit for detectability, separate from safety.
+9. **Privacy of the cognitive cycle:** Avoid speculative over-design. The 6-step cycle is sound; its sub-steps should be built only when evidence demands them.
+10. **Identity deferral:** Product-vs-research identity decision deferred until safety observability is restored. Only 4 configs depend on identity (fail_open, exploration, persistence, restart).

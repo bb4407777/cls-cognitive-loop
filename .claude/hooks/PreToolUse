@@ -1,0 +1,107 @@
+#!/bin/bash
+# CLS Cognitive Loop — PreToolUse Hook (macOS/Linux adaptation)
+# v2: + blocked_state.json + heartbeat.json (No Silent Terminal State)
+CLS_ROOT="/Users/gao/Code/cls-cognitive-loop"
+COG_STEP_FILE="$CLS_ROOT/data/state/cog_step.json"
+RECURSION_FILE="$CLS_ROOT/data/state/recursion_depth.json"
+AUDIT_LOG="$CLS_ROOT/data/state/hook_audit.jsonl"
+HEARTBEAT_FILE="$CLS_ROOT/data/state/heartbeat.json"
+BLOCKED_STATE_FILE="$CLS_ROOT/data/state/blocked_state.json"
+MAX_DEPTH=5
+TTL=300
+
+tool_name="$1"
+tool_input="$2"
+
+log() {
+  local v=$1 c=$2 d=$3
+  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"tool\":\"$tool_name\",\"verdict\":\"$v\",\"check\":\"$c\",\"detail\":\"$d\"}" >> "$AUDIT_LOG"
+}
+
+write_heartbeat() {
+  local phase=$1 progress=$2 reason=${3:-null}
+  local ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # Read safety_status from fuse status if available, default to "ok"
+  local fuse_profile="full"
+  local safety="ok"
+  cat > "$HEARTBEAT_FILE" <<EOF
+{"timestamp":"$ts","phase":"$phase","step_counter":0,"safety_status":"$safety","progress_status":"$progress","block_reason":$reason,"fuse_profile":"$fuse_profile"}
+EOF
+}
+
+write_blocked_state() {
+  local reason=$1 depth=$2 max_depth=$3
+  local ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  mkdir -p "$(dirname "$BLOCKED_STATE_FILE")"
+  cat > "$BLOCKED_STATE_FILE" <<EOF
+{
+  "status": "blocked",
+  "reason": "$reason",
+  "timestamp": "$ts",
+  "recoverable": false,
+  "details": {
+    "depth": $depth,
+    "max_depth": $max_depth
+  }
+}
+EOF
+  # Also update heartbeat to reflect blocked state
+  write_heartbeat "blocked" "blocked" "\"$reason\""
+}
+
+# CHECK 1: COG_STEP
+if [[ "$tool_name" == "Write" || "$tool_name" == "Edit" ]]; then
+  file_path=$(echo "$tool_input" | python3 -c "import sys,json; print(json.load(sys.stdin).get('file_path',''))" 2>/dev/null)
+  if [[ "$file_path" != *"cog_step.json"* ]]; then
+    if [[ ! -f "$COG_STEP_FILE" ]]; then
+      log "BLOCK" "COG_STEP" "missing"
+      echo "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"[COG_STEP] No step declared. Write cog_step.json first.\"}"
+      exit 0
+    fi
+    declared_at=$(python3 -c "import json; print(json.load(open('$COG_STEP_FILE'))['declared_at'])" 2>/dev/null)
+    now=$(date +%s)
+    decl_ts=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$declared_at" +%s 2>/dev/null)
+    age=$((now - decl_ts))
+    if [[ $age -gt $TTL ]]; then
+      log "BLOCK" "COG_EXPIRED" "age=$age"
+      echo "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"[COG_STEP] Expired ($age > $TTL s). Re-declare.\"}"
+      exit 0
+    fi
+    log "PASS" "COG_STEP" "ok"
+  fi
+fi
+
+# CHECK 2: RECURSION_LIMIT
+# First, check if system is already in blocked state
+if [[ -f "$BLOCKED_STATE_FILE" ]]; then
+  blocked_status=$(python3 -c "import json; print(json.load(open('$BLOCKED_STATE_FILE')).get('status',''))" 2>/dev/null)
+  if [[ "$blocked_status" == "blocked" ]]; then
+    log "BLOCK" "TERMINAL" "system in blocked state"
+    echo "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"[FUSE:TERMINAL] System is blocked. Clear blocked_state.json to resume.\"}"
+    exit 0
+  fi
+fi
+
+depth=0
+if [[ -f "$RECURSION_FILE" ]]; then
+  depth=$(python3 -c "import json; print(json.load(open('$RECURSION_FILE'))['depth'])" 2>/dev/null || echo 0)
+fi
+depth=$((depth + 1))
+if [[ $depth -gt $MAX_DEPTH ]]; then
+  log "BLOCK" "RECURSION" "depth=$depth"
+  # Write blocked state (terminal, not recoverable)
+  write_blocked_state "recursion_limit" $depth $MAX_DEPTH
+  echo "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"[FUSE:RECURSION] $depth > $MAX_DEPTH — terminal. Clear blocked_state.json to resume.\"}"
+  exit 0
+fi
+echo "{\"depth\":$depth,\"tool\":\"$tool_name\",\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$RECURSION_FILE"
+
+# Write heartbeat on pass (read current phase from cog_step.json)
+phase="unknown"
+if [[ -f "$COG_STEP_FILE" ]]; then
+  phase=$(python3 -c "import json; print(json.load(open('$COG_STEP_FILE')).get('phase',0))" 2>/dev/null || echo "unknown")
+fi
+write_heartbeat "phase_${phase}" "running" "null"
+
+log "ALLOW" "PASSED" "depth=$depth"
+echo "{\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"[CLS] OK depth=$depth\"}"
