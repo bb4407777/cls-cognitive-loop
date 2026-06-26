@@ -204,3 +204,33 @@ The following are explicitly excluded from the safety recovery phase. They will 
 | D-006 | Fail-open NOT global default | Safety fuses should be fail-closed; capability fuses may be fail-open |
 | D-007 | Architecture Contract = two-layer | Shallow (string scan, zero side effects) + deep (find_spec, no module execution) |
 | D-008 | PR #1 = atomic (steps 1+2+3) | Fixing config without MVS and enforcement fix creates incomplete safety |
+
+---
+
+## Lessons Learned
+
+### LL-001: Detection ≠ Enforcement Was Wrong
+
+**R2 hypothesis:** The 5+ consecutive RECURSION BLOCK events in hook_audit.jsonl were caused by the hook detecting the condition but returning an ignored value (Detection ≠ Enforcement).
+
+**R3 finding:** Enforcement was working correctly. The PreToolUse hook executed `exit 0` with a deny verdict on every block. The real problem was that the **blocked state was not observable by the caller** — the depth counter only advanced on PASS, so the next tool call read the same depth and hit the same block, creating an infinite retry loop.
+
+**Why this matters:**
+- The system had Prevention (✅ hook blocks at depth > 5)
+- But lacked Progress Semantics (❌ how to exit the blocked state)
+- This is a **Recovery Failure / Liveness Failure**, not a Safety Failure
+
+### LL-002: No Silent Terminal State
+
+Derived principle from LL-001: any condition that permanently stops execution must:
+1. Persist to a terminal state file (`blocked_state.json`)
+2. Block retries at the hook level (check before allowing any operation)
+3. Return a clear, actionable message to the caller
+
+Implemented in PR #2 via `scripts/safety/blocked_state.py` + hook v2.
+
+### LL-003: Assumptions Must Be Grounded in Code, Not Reasoning
+
+The R2 panel assigned 60% probability to "ignored return value" without reading the actual hook code. The hook (`PreToolUse`) was in `.claude/hooks/` — a path covered by the repo's documented structure. A 5-minute file read would have disproved the hypothesis before Round 3.
+
+**Process improvement:** Before formulating hypotheses about a system's behavior, read the enforcement code first. Especially when it's a shell script — shells do not silently ignore `exit 0`.
