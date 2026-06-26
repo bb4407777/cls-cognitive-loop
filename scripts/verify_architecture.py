@@ -25,8 +25,40 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 DOCS_DIR = PROJECT_ROOT / "docs"
 
 # Known stubs (purposefully missing implementations)
-KNOWN_STUBS = {"scripts.wheels.api_pipeline", "scripts.wheels.trust_features",
-               "scripts.wheels.cross_validator"}
+KNOWN_STUBS = {
+    "scripts.wheels.api_pipeline",
+    "scripts.wheels.trust_features",
+    "scripts.wheels.cross_validator",
+}
+
+# Known docstring-only references (usage examples in file headers, not code imports)
+KNOWN_DOCSTRING_REFS = {
+    "scripts.wheels.qwen_gate",
+    "scripts.wheels.trust_gate",
+    "scripts.wheels.trust_labeler",
+    "scripts.fuse_board",  # docstring usage example in fuse_board.py itself
+}
+
+# Known planned/research components (documented in ARCHITECTURE.md §3/§4)
+KNOWN_PLANNED = {
+    "scripts/self_activate.py",
+    "scripts/wheels/strategy_selector.py",
+    "scripts/wheels/epsilon_gate.py",
+    "scripts/wheels/external_anchor.py",
+    "scripts/wheels/cls_memory.py",
+    "scripts/wheels/path_mutation.py",
+    "scripts/wheels/premise_check.py",
+    "scripts/wheels/cross_window_hook.py",
+    "scripts/wheels/knowledge_quality_gate.py",
+    "scripts/wheels/compact_health_board.py",
+    "scripts/anti_atrophy_consumer.py",
+}
+
+KNOWN_RESEARCH = {
+    "scripts/wheels/symbolic_observer.py",
+    "scripts/symbolic_dynamics_engine.py",
+    "scripts/cross_window_awareness.py",
+}
 
 # Patterns to search
 IMPORT_PATTERN = re.compile(
@@ -90,8 +122,8 @@ def layer1_check() -> list[str]:
             continue
         imports = extract_imports_from_file(py_file)
         for mod in sorted(imports):
-            # Known stubs are allowed
-            if mod in KNOWN_STUBS:
+            # Known stubs and docstring-only refs are allowed
+            if mod in KNOWN_STUBS or mod in KNOWN_DOCSTRING_REFS:
                 continue
             target = import_to_file(mod)
             if not target.exists():
@@ -101,6 +133,9 @@ def layer1_check() -> list[str]:
     for doc_file in sorted(DOCS_DIR.rglob("*.md")):
         refs = extract_doc_refs(doc_file)
         for ref in sorted(refs):
+            # Skip known planned/research components
+            if ref in KNOWN_PLANNED or ref in KNOWN_RESEARCH:
+                continue
             ref_path = PROJECT_ROOT / ref
             if not ref_path.exists():
                 # Check if it's a stub
@@ -118,6 +153,11 @@ def layer2_check() -> list[str]:
     Returns list of unresolvable imports (empty = pass).
     """
     import importlib.util
+    # Ensure project root and scripts dir are on path for find_spec
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
     unresolvable = []
 
     # Collect all unique imports from all Python files
@@ -131,7 +171,7 @@ def layer2_check() -> list[str]:
     script_imports = {m for m in all_imports if m.startswith("scripts.")}
 
     for mod in sorted(script_imports):
-        if mod in KNOWN_STUBS:
+        if mod in KNOWN_STUBS or mod in KNOWN_DOCSTRING_REFS:
             continue
         spec = importlib.util.find_spec(mod)
         if spec is None:
