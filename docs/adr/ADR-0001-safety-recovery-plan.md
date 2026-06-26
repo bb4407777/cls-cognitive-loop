@@ -179,6 +179,21 @@ CLS leaves Safety Recovery Mode when **ALL** of the following are true:
 
 ---
 
+## Epic Closure
+
+**Status:** ✅ COMPLETE — 2026-06-27
+**Tag:** `v0.4-safety-recovered`
+**Merge:** `fix/safety-recovery` → `master` (1fa9fb2..8514211)
+
+**Delivered:**
+- 4 PRs, 17 files, +1529/-400 lines
+- Self-test: 20/20
+- Architecture Contract: L1+L2 PASS
+
+**Next:** Operational Validation (3-7 days) → Cognitive Justification Review → Rebuild Cognition decision
+
+---
+
 ## Out of Scope (Not to Be Discussed During Safety Recovery)
 
 The following are explicitly excluded from the safety recovery phase. They will be revisited after Exit Criteria are met:
