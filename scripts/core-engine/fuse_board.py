@@ -49,10 +49,42 @@ from typing import Any, Optional
 
 # ─── paths ────────────────────────────────────────────────────
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "data" / "safety" / "fuses_config.json"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+CONFIG_PATH = PROJECT_ROOT / "data" / "safety-configs" / "fuses_config.json"
 LOG_PATH = PROJECT_ROOT / "data" / "safety" / "fuse_log.jsonl"
 STATE_PATH = PROJECT_ROOT / "data" / "safety" / "fuse_state.json"
+
+# ─── Minimum Viable Safety (MVS) profile ──────────────────────
+
+MVS_PROFILE: dict = {
+    "version": 1,
+    "profile": "mvs",
+    "description": "Minimum Viable Safety — activated when primary config is missing",
+    "fuses": {
+        "RECURSION_LIMIT": {
+            "enabled": True,
+            "max_depth": 5,
+            "action": "block",
+            "description": "MVS: prevent infinite recursion",
+        },
+        "WRITE_PROTECT": {
+            "enabled": True,
+            "action": "block",
+            "protected_patterns": [
+                "scripts/fuse_board.py",
+                "scripts/core-engine/*",
+                "data/safety-configs/*",
+                ".claude/hooks/*",
+            ],
+            "description": "MVS: protect core engine files",
+        },
+        "SELF_MODIFICATION": {
+            "enabled": True,
+            "action": "block",
+            "description": "MVS: prevent system self-modification",
+        },
+    },
+}
 
 
 # ─── fuse type enum ───────────────────────────────────────────
@@ -69,6 +101,7 @@ class FuseType(str, enum.Enum):
     SELF_EVALUATION_PROHIBITED = "SELF_EVALUATION_PROHIBITED"  # 禁止自我评价：创造层不碰评价层，{HUMAN_REVIEWER}的铁律，2026-06-03
     DUAL_AI_GATE = "DUAL_AI_GATE"                              # 双AI闸门：所有产出/学习必须过Qwen验证，{HUMAN_REVIEWER}的铁律，2026-06-03
     QWEN_DOWN_TOO_LONG = "QWEN_DOWN_TOO_LONG"                  # Qwen长时间离线: >30min阻断需验证的领域知识产出, 2026-06-05
+    SELF_MODIFICATION = "SELF_MODIFICATION"                    # 自修改熔断: MVS模式下禁止修改系统自身
 
 
 # ─── fuse type 的允许字符串值（给外部调用用）───────────────────
@@ -141,6 +174,11 @@ class SoftwareFuseBackend(FuseBackend):
         self._state_path = STATE_PATH
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Log safety status at startup
+        profile = self._config.get("profile", "unknown")
+        if profile == "mvs":
+            self._emergency_log("BOOT", "MVS_ACTIVATED — primary config not found")
+
     # ── 公共接口 (from FuseBackend) ──────────────────────────
 
     def check(self, fuse_type: str, context: dict | None = None) -> bool:
@@ -168,6 +206,8 @@ class SoftwareFuseBackend(FuseBackend):
                 return self._check_self_evaluation(fuse_cfg, ctx)
             elif fuse_type == FuseType.DUAL_AI_GATE.value:
                 return self._check_dual_ai_gate(fuse_cfg, ctx)
+            elif fuse_type == FuseType.SELF_MODIFICATION.value:
+                return self._check_self_modification(fuse_cfg, ctx)
             else:
                 return True
         except Exception:
@@ -439,6 +479,48 @@ class SoftwareFuseBackend(FuseBackend):
 
         return True
 
+    def _check_self_modification(self, cfg: dict, ctx: dict) -> bool:
+        """自修改熔断：MVS模式下禁止修改系统核心文件。
+
+        MVS SELF_MODIFICATION fuse 是一个全局开关：
+        启用时，对核心引擎文件的任何写入都会被阻止。
+
+        context 应包含:
+            path: str  — 目标文件路径
+            operation: str — "write" | "edit" | "delete" | "rename"
+        """
+        # SELF_MODIFICATION 是全局开关 — 启用即阻止核心路径写入
+        # 具体路径保护由 WRITE_PROTECT 的 patterns 控制
+        path = ctx.get("path", "")
+        operation = ctx.get("operation", "write")
+
+        if not path:
+            return True  # 无路径信息时默认放行
+
+        # 转为相对路径
+        norm_path = path.replace("\\", "/")
+        if ":/" in norm_path:
+            parts = norm_path.split("/")
+            try:
+                idx = parts.index("claude")
+                norm_path = "/".join(parts[idx + 1:])
+            except ValueError:
+                norm_path = path
+
+        # 核心引擎路径前缀匹配
+        core_prefixes = [
+            "scripts/core-engine/",
+            "scripts/fuse_board.py",
+            "scripts/safety/",
+            "data/safety-configs/",
+            ".claude/hooks/",
+        ]
+        for prefix in core_prefixes:
+            if norm_path.startswith(prefix) or norm_path.startswith(prefix.lstrip(".")):
+                return False
+
+        return True
+
     def _check_dual_ai_gate(self, cfg: dict, ctx: dict) -> bool:
         """双AI闸门熔断：每件产出/学习必须通过 Qwen 独立验证。
 
@@ -492,9 +574,12 @@ class SoftwareFuseBackend(FuseBackend):
         try:
             if CONFIG_PATH.exists():
                 return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-        return {"version": 0, "fuses": {}}
+        except Exception as e:
+            self._emergency_log("CONFIG", f"load_failed: {e}")
+            # Fall through to MVS
+        # Config not found or corrupt → activate Minimum Viable Safety
+        self._emergency_log("CONFIG", "not_found_or_corrupt_using_MVS")
+        return MVS_PROFILE
 
     def _load_state(self) -> dict:
         try:
@@ -629,8 +714,8 @@ def self_test() -> bool:
     failed = 0
 
     tests = [
-        ("[1]  状态查询: 9个熔断器",
-         lambda: (len(board.status()["fuses"]) == 9, "预期9个")),  # 2026-06-05 修复: 8→9 (新增NUMERIC_COMPUTATION/SELF_EVALUATION_PROHIBITED/DUAL_AI_GATE)
+        ("[1]  状态查询: 11个熔断器",
+         lambda: (len(board.status()["fuses"]) == 11, "预期11个")),
 
         ("[2]  写保护-核心文件: 拒绝",
          lambda: (board.check("WRITE_PROTECT", {"path": "scripts/fuse_board.py"}) is False,
@@ -779,6 +864,6 @@ if __name__ == "__main__":
         print(f"  配置: {CONFIG_PATH}")
         print(f"  日志: {LOG_PATH}")
         print(f"  状态: {STATE_PATH}")
-        print(f"  9个熔断器就绪")
+        print(f"  {len(FUSE_TYPES)}个熔断器就绪")
         print(f"  --self-test  运行自检")
         print(f"  --status     查看状态")
